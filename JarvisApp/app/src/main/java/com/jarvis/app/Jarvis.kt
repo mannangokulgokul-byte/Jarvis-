@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -24,13 +26,30 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 fun recognizerIntent(lang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+ Check failure on line 32 in .github/workflows/build.yml
+
+
+GitHub Actions
+/ .github/workflows/build.yml
+Invalid workflow file
+
+You have an error in your yaml syntax on line 32
 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
 .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+
+val SYS = "You are JARVIS, a fast voice assistant on an Android phone. Reply in the user's language (Tamil script for Tamil), max 2 short sentences, no markdown. " +
+"If the user wants a phone action, reply ONLY with CMD: followed by exactly one command in this syntax: " +
+"open <app>; call <name or number>; send sms to <name or number> saying <text>; alarm <h> <mm> am|pm; timer <n> minutes; " +
+"remind me to <task> in <n> minutes; note <text>; add <item> to shopping list; expense <amount> <category>; news; wiki <topic>; " +
+"flashlight on|off; volume up|down; search <query>; youtube <query>; navigate <place>; whatsapp <name or number> <text>; camera. " +
+"Otherwise just answer."
 
 class Jarvis(private val ctx: Context, private val onReply: (String) -> Unit) {
 private val prefs = ctx.getSharedPreferences("jarvis", 0)
@@ -39,8 +58,7 @@ private var ready = false
 private var tts: TextToSpeech? = null
 var onCamera: ((String) -> Unit)? = null
 
-// Fast first, then fallbacks. Whole chain is capped at ~9 seconds.
-private val models = listOf("gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash")
+private val models = listOf("gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash")
 
 init {
 tts = TextToSpeech(ctx) { st ->
@@ -49,11 +67,25 @@ tts?.setAudioAttributes(AudioAttributes.Builder()
 .setUsage(AudioAttributes.USAGE_MEDIA)
 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
 tts?.setSpeechRate(0.95f)
+tts?.setPitch(0.8f)
 }
 }
 
 fun speaking() = tts?.isSpeaking == true
 fun shutdown() { tts?.shutdown() }
+
+private fun applyVoice() {
+val n = prefs.getString("vname", null) ?: return
+tts?.voices?.firstOrNull { it.name == n }?.let { tts?.voice = it }
+}
+
+fun nextVoice() {
+val vs = (tts?.voices ?: emptySet()).filter { it.locale.language == "en" }.sortedBy { it.name }
+if (vs.isEmpty()) return say("Voice onnum kedaikala")
+val i = (vs.indexOfFirst { it.name == prefs.getString("vname", "") } + 1) % vs.size
+prefs.edit().putString("vname", vs[i].name).apply()
+say("Voice number ${i + 1}. Idhu male voice-a?")
+}
 
 fun say(t: String) {
 onReply(t)
@@ -62,6 +94,7 @@ val ta = t.any { it in '\u0B80'..'\u0BFF' }
 val r = tts?.setLanguage(if (ta) Locale("ta", "IN") else Locale("en", "IN"))
 if (ta && (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED))
 tts?.setLanguage(Locale("en", "IN"))
+if (!ta) applyVoice()
 var first = true
 t.split(Regex("(?<=[.!?\u0964])\\s+")).filter { it.isNotBlank() }.forEach {
 tts?.speak(it, if (first) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, "j")
@@ -77,6 +110,7 @@ try { ctx.startActivity(i) } catch (e: Exception) { say("Ennala mudiyala: ${e.me
 
 private fun has(p: String) = ctx.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+private fun enc(s: String) = URLEncoder.encode(s.trim(), "UTF-8")
 private fun lines(k: String) = prefs.getString(k, "").orEmpty().lines().filter { it.isNotBlank() }
 private fun addLine(k: String, v: String) =
 prefs.edit().putString(k, (prefs.getString(k, "") ?: "") + v + "\n").apply()
@@ -91,16 +125,22 @@ main.post { say(r) }
 private fun get(u: String): String {
 val c = URL(u).openConnection() as HttpURLConnection
 c.connectTimeout = 4000; c.readTimeout = 4000
-c.setRequestProperty("User-Agent", "Jarvis/2.0")
+c.setRequestProperty("User-Agent", "Jarvis/3.0")
 return c.inputStream.bufferedReader().readText()
 }
 
-fun handle(raw: String) {
+fun handle(raw: String, ai: Boolean = false) {
 val t = raw.trim().lowercase(Locale.ROOT)
 when {
 t.startsWith("open ") -> openApp(t.removePrefix("open ").trim())
 t.startsWith("call ") -> call(t.removePrefix("call ").trim())
 t.startsWith("send sms") || t.startsWith("message ") || t.startsWith("text ") -> sms(t)
+t.startsWith("whatsapp ") -> whatsapp(t.removePrefix("whatsapp ").trim())
+t.startsWith("flashlight") || t.startsWith("torch") -> torch(!t.contains("off"))
+t.startsWith("volume ") -> volume(t.contains("up"))
+t.startsWith("search ") -> web("https://www.google.com/search?q=" + enc(t.removePrefix("search ")), "Google-la theduren")
+t.startsWith("youtube ") -> web("https://www.youtube.com/results?search_query=" + enc(t.removePrefix("youtube ")), "YouTube-la theduren")
+t.startsWith("navigate ") -> web("geo:0,0?q=" + enc(t.removePrefix("navigate ")), "Maps open aagudhu")
 t.contains("alarm") -> alarm(t)
 t.contains("remind me") -> remind(t)
 t.contains("timer") -> timer(t)
@@ -120,8 +160,36 @@ t.contains("clear notes") -> { prefs.edit().remove("notes").apply(); say("Notes 
 t.startsWith("wiki ") || t.startsWith("wikipedia ") -> wiki(t.substringAfter(" "))
 t.contains("news") -> news()
 t.contains("camera") || t.contains("what is this") -> onCamera?.invoke(raw) ?: say("App-la camera button use pannunga")
-else -> ask(raw)
+else -> if (ai) say("Idhu enakku seiya theriyala") else ask(raw)
 }
+}
+
+private fun web(url: String, msg: String) {
+say(msg)
+go(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+}
+
+private fun torch(on: Boolean) {
+try {
+val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+cm.setTorchMode(cm.cameraIdList[0], on)
+say(if (on) "Torch on" else "Torch off")
+} catch (e: Exception) { say("Torch mudiyala") }
+}
+
+private fun volume(up: Boolean) {
+val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+say(if (up) "Volume increase" else "Volume decrease")
+}
+
+private fun whatsapp(arg: String) {
+val p = arg.split(" ", limit = 2)
+var n = resolve(p[0]) ?: return say("${p[0]} number kedaikala")
+n = n.filter { it.isDigit() }
+if (n.length == 10) n = "91$n"
+web("https://wa.me/$n?text=" + enc(p.getOrElse(1) { "" }), "WhatsApp open aagudhu")
 }
 
 private fun openApp(name: String) {
@@ -230,7 +298,12 @@ j.getString("extract").split(Regex("(?<=\\.)\\s")).take(2).joinToString(" ")
 
 private fun part(s: String) = JSONObject().put("text", s)
 
-private fun ask(q: String) = bg { gemini(JSONArray().put(part(q))) }
+private fun ask(q: String) {
+Thread {
+val r = try { gemini(JSONArray().put(part(q))) } catch (e: Exception) { "Net slow, thirumba sollunga" }
+main.post { if (r.startsWith("CMD:")) handle(r.removePrefix("CMD:").trim(), true) else say(r) }
+}.start()
+}
 
 fun askImage(bmp: Bitmap, q: String) = bg {
 val o = ByteArrayOutputStream()
@@ -240,36 +313,48 @@ val img = JSONObject().put("inline_data", JSONObject().put("mime_type", "image/j
 gemini(JSONArray().put(part(q.ifBlank { "Idhu enna? Briefly sollunga." })).put(img))
 }
 
-private fun gemini(parts: JSONArray): String {
-val key = prefs.getString("key", "").orEmpty()
-if (key.isBlank()) return "Gemini key app-la save pannunga"
-val end = System.currentTimeMillis() + 9000
-val sys = "You are JARVIS, a witty voice assistant. Reply in the same language the user used (Tamil script for Tamil). Maximum 2 short sentences, no markdown."
-for (m in models) {
-val left = (end - System.currentTimeMillis()).toInt()
-if (left < 1500) break
-try {
+private fun ask1(m: String, key: String, parts: JSONArray, ms: Int): String {
 val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent?key=$key")
 .openConnection() as HttpURLConnection
 c.requestMethod = "POST"
 c.setRequestProperty("Content-Type", "application/json")
 c.connectTimeout = 3000
-c.readTimeout = minOf(left, 4500)
+c.readTimeout = ms
 c.doOutput = true
-val cfg = JSONObject().put("maxOutputTokens", 150).put("temperature", 0.7)
+val cfg = JSONObject().put("maxOutputTokens", 120).put("temperature", 0.6)
 if (m.contains("2.5")) cfg.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
 val body = JSONObject()
-.put("system_instruction", JSONObject().put("parts", JSONArray().put(part(sys))))
+.put("system_instruction", JSONObject().put("parts", JSONArray().put(part(SYS))))
 .put("contents", JSONArray().put(JSONObject().put("parts", parts)))
 .put("generationConfig", cfg)
 c.outputStream.use { it.write(body.toString().toByteArray()) }
-if (c.responseCode == 200) {
+if (c.responseCode != 200) return ""
 val r = c.inputStream.bufferedReader().readText()
 return JSONObject(r).getJSONArray("candidates").getJSONObject(0)
 .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text").trim()
 }
-} catch (e: Exception) { }
+
+// Races several models; first good answer wins.
+private fun gemini(parts: JSONArray): String {
+val key = prefs.getString("key", "").orEmpty()
+if (key.isBlank()) return "Gemini key app-la save pannunga"
+val q = LinkedBlockingQueue<String>()
+val end = System.currentTimeMillis() + 10000
+var started = 0
+fun launch(m: String) {
+started++
+Thread { q.put(try { ask1(m, key, parts, 7000) } catch (e: Exception) { "" }) }.start()
 }
-return "Server busy, konjam apram try pannunga"
+launch(models[0]); launch(models[1])
+var done = 0
+var next = 2
+while (done < started && System.currentTimeMillis() < end) {
+val r = q.poll(if (next < models.size) 2500L else 500L, TimeUnit.MILLISECONDS)
+if (r == null) { if (next < models.size) launch(models[next++]); continue }
+done++
+if (r.isNotBlank()) return r
+if (next < models.size) launch(models[next++])
+}
+return "Net konjam slow, thirumba sollunga"
 }
 }
