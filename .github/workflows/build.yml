@@ -1,344 +1,352 @@
-name: Build Jarvis APK
-on: [push, workflow_dispatch]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-      - name: Add project files
-        run: |
-          cd JarvisApp
-          mkdir -p $(dirname settings.gradle.kts)
-          cat > settings.gradle.kts <<'EOF'
-          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "Jarvis"
-          include(":app")
-          EOF
-          mkdir -p $(dirname build.gradle.kts)
-          cat > build.gradle.kts <<'EOF'
-          plugins {
-          id("com.android.application") version "8.5.2" apply false
-          id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-          }
-          EOF
-          mkdir -p $(dirname gradle.properties)
-          cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx2048m
-          android.useAndroidX=false
-          kotlin.code.style=official
-          EOF
-          mkdir -p $(dirname app/build.gradle.kts)
-          cat > app/build.gradle.kts <<'EOF'
-          plugins {
-          id("com.android.application")
-          id("org.jetbrains.kotlin.android")
-          }
-          android {
-          namespace = "com.jarvis.app"
-          compileSdk = 34
-          defaultConfig {
-          applicationId = "com.jarvis.app"
-          minSdk = 26
-          targetSdk = 34
-          versionCode = 2
-          versionName = "2.0"
-          }
-          compileOptions {
-          sourceCompatibility = JavaVersion.VERSION_17
-          targetCompatibility = JavaVersion.VERSION_17
-          }
-          kotlinOptions { jvmTarget = "17" }
-          }
-          EOF
-          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-          <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-          <uses-permission android:name="android.permission.INTERNET"/>
-          <uses-permission android:name="android.permission.CALL_PHONE"/>
-          <uses-permission android:name="android.permission.SEND_SMS"/>
-          <uses-permission android:name="android.permission.READ_CONTACTS"/>
-          <uses-permission android:name="android.permission.SET_ALARM"/>
-          <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-          <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-          <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
-          <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-          <queries>
-          <intent>
-          <action android:name="android.intent.action.MAIN"/>
-          <category android:name="android.intent.category.LAUNCHER"/>
-          </intent>
-          <intent><action android:name="android.speech.RecognitionService"/></intent>
-          <intent><action android:name="android.intent.action.TTS_SERVICE"/></intent>
-          </queries>
-          <application android:label="Jarvis" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-          <activity android:name=".MainActivity" android:exported="true">
-          <intent-filter>
-          <action android:name="android.intent.action.MAIN"/>
-          <category android:name="android.intent.category.LAUNCHER"/>
-          </intent-filter>
-          </activity>
-          <service android:name=".JarvisService" android:exported="false"
-          android:foregroundServiceType="microphone"/>
-          </application>
-          </manifest>
-          EOF
-          mkdir -p $(dirname app/src/main/java/com/jarvis/app/JarvisService.kt)
-          cat > app/src/main/java/com/jarvis/app/JarvisService.kt <<'EOF'
-          package com.jarvis.app
+package com.jarvis.app
 
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.Service
-          import android.content.Intent
-          import android.content.pm.ServiceInfo
-          import android.os.Build
-          import android.os.Bundle
-          import android.os.Handler
-          import android.os.IBinder
-          import android.os.Looper
-          import android.speech.RecognitionListener
-          import android.speech.SpeechRecognizer
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.hardware.camera2.CameraManager
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.AlarmClock
+import android.provider.ContactsContract
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.telephony.SmsManager
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
-          class JarvisService : Service(), RecognitionListener {
-          private lateinit var jarvis: Jarvis
-          private var sr: SpeechRecognizer? = null
-          private val h = Handler(Looper.getMainLooper())
-          private var awaiting = false
-          private var alive = true
-          private val wake = listOf("jarvis", "\u0B9C\u0BBE\u0BB0\u0BCD\u0BB5\u0BBF\u0BB8\u0BCD", "\u0B9C\u0BBE\u0BB0\u0BCD\u0BB5\u0BBF\u0B9A\u0BCD", "\u0B9C\u0BBE\u0BB0\u0BCD\u0BB5\u0BC0\u0BB8\u0BCD")
+fun recognizerIntent(lang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+.putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
 
-          override fun onCreate() {
-          super.onCreate()
-          getSystemService(NotificationManager::class.java)
-          .createNotificationChannel(NotificationChannel("j", "Jarvis", NotificationManager.IMPORTANCE_LOW))
-          val n = Notification.Builder(this, "j").setContentTitle("Jarvis kekkuthu: 'Hey Jarvis'")
-          .setSmallIcon(android.R.drawable.ic_btn_speak_now).build()
-          if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-          else startForeground(1, n)
-          jarvis = Jarvis(this) {}
-          listen()
-          }
+val SYS = "You are JARVIS, a fast voice assistant on an Android phone. Reply in the user's language (Tamil script for Tamil), max 2 short sentences, no markdown. " +
+"If the user wants a phone action, reply ONLY with CMD: followed by exactly one command in this syntax: " +
+"open <app>; call <name or number>; send sms to <name or number> saying <text>; alarm <h> <mm> am|pm; timer <n> minutes; " +
+"remind me to <task> in <n> minutes; note <text>; add <item> to shopping list; expense <amount> <category>; news; wiki <topic>; " +
+"flashlight on|off; volume up|down; search <query>; youtube <query>; navigate <place>; whatsapp <name or number> <text>; camera. " +
+"Otherwise just answer."
 
-          private fun listen() {
-          if (!alive) return
-          if (jarvis.speaking()) { h.postDelayed({ listen() }, 500); return }
-          sr?.destroy()
-          val lang = getSharedPreferences("jarvis", 0).getString("lang", "ta-IN") ?: "ta-IN"
-          sr = SpeechRecognizer.createSpeechRecognizer(this).also {
-          it.setRecognitionListener(this)
-          it.startListening(recognizerIntent(lang))
-          }
-          }
+class Jarvis(private val ctx: Context, private val onReply: (String) -> Unit) {
+private val prefs = ctx.getSharedPreferences("jarvis", 0)
+private val main = Handler(Looper.getMainLooper())
+private var ready = false
+private var tts: TextToSpeech? = null
+var onCamera: ((String) -> Unit)? = null
 
-          override fun onResults(b: Bundle?) {
-          val all = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty().map { it.lowercase() }
-          val first = all.firstOrNull().orEmpty()
-          val hit = all.firstOrNull { r -> wake.any { r.contains(it) } }
-          if (awaiting && first.isNotBlank()) { awaiting = false; jarvis.handle(first) }
-          else if (hit != null) {
-          val w = wake.first { hit.contains(it) }
-          val cmd = hit.substringAfter(w).trim().trimStart(',').trim()
-          if (cmd.isEmpty()) { awaiting = true; jarvis.say("Yes boss?") } else jarvis.handle(cmd)
-          }
-          h.postDelayed({ listen() }, 600)
-          }
+private val models = listOf("gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash")
 
-          override fun onError(error: Int) { h.postDelayed({ listen() }, 800) }
-          override fun onReadyForSpeech(p: Bundle?) {}
-          override fun onBeginningOfSpeech() {}
-          override fun onRmsChanged(v: Float) {}
-          override fun onBufferReceived(b: ByteArray?) {}
-          override fun onEndOfSpeech() {}
-          override fun onPartialResults(p: Bundle?) {}
-          override fun onEvent(t: Int, p: Bundle?) {}
-          override fun onBind(i: Intent?): IBinder? = null
+init {
+tts = TextToSpeech(ctx) { st ->
+ready = st == TextToSpeech.SUCCESS
+tts?.setAudioAttributes(AudioAttributes.Builder()
+.setUsage(AudioAttributes.USAGE_MEDIA)
+.setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+tts?.setSpeechRate(0.95f)
+tts?.setPitch(0.8f)
+}
+}
 
-          override fun onDestroy() {
-          alive = false
-          sr?.destroy()
-          jarvis.shutdown()
-          super.onDestroy()
-          }
-          }
-          EOF
-          mkdir -p $(dirname app/src/main/java/com/jarvis/app/OrbView.kt)
-          cat > app/src/main/java/com/jarvis/app/OrbView.kt <<'EOF'
-          package com.jarvis.app
+fun speaking() = tts?.isSpeaking == true
+fun shutdown() { tts?.shutdown() }
 
-          import android.animation.ValueAnimator
-          import android.content.Context
-          import android.graphics.Canvas
-          import android.graphics.Paint
-          import android.graphics.RadialGradient
-          import android.graphics.Shader
-          import android.view.View
-          import android.view.animation.LinearInterpolator
-          import kotlin.math.sin
+private fun applyVoice() {
+val n = prefs.getString("vname", null) ?: return
+tts?.voices?.firstOrNull { it.name == n }?.let { tts?.voice = it }
+}
 
-          class OrbView(c: Context) : View(c) {
-          var state = 0      // 0 idle, 1 listening, 2 thinking
-          var level = 0f     // 0..1 mic loudness
-          private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-          private var t = 0f
+fun nextVoice() {
+val vs = (tts?.voices ?: emptySet()).filter { it.locale.language == "en" }.sortedBy { it.name }
+if (vs.isEmpty()) return say("Voice onnum kedaikala")
+val i = (vs.indexOfFirst { it.name == prefs.getString("vname", "") } + 1) % vs.size
+prefs.edit().putString("vname", vs[i].name).apply()
+say("Voice number ${i + 1}. Idhu male voice-a?")
+}
 
-          init {
-          ValueAnimator.ofFloat(0f, 6.2832f).apply {
-          duration = 2000; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator()
-          addUpdateListener { t = it.animatedValue as Float; invalidate() }
-          }.start()
-          }
+fun say(t: String) {
+onReply(t)
+if (!ready) return
+val ta = t.any { it in '\u0B80'..'\u0BFF' }
+val r = tts?.setLanguage(if (ta) Locale("ta", "IN") else Locale("en", "IN"))
+if (ta && (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED))
+tts?.setLanguage(Locale("en", "IN"))
+if (!ta) applyVoice()
+var first = true
+t.split(Regex("(?<=[.!?\u0964])\\s+")).filter { it.isNotBlank() }.forEach {
+tts?.speak(it, if (first) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, "j")
+tts?.playSilentUtterance(180, TextToSpeech.QUEUE_ADD, "p")
+first = false
+}
+}
 
-          override fun onDraw(cv: Canvas) {
-          val cx = width / 2f; val cy = height / 2f
-          val base = minOf(width, height) * 0.2f
-          val col = when (state) { 1 -> 0xFF00E5FF.toInt(); 2 -> 0xFFFFB300.toInt(); else -> 0xFF3D7BFF.toInt() }
-          val speed = if (state == 2) 3f else 1f
-          for (i in 3 downTo 1) {
-          val r = base * (1f + i * 0.3f) * (1f + 0.06f * sin(t * speed + i) + level * 0.5f)
-          p.shader = null; p.color = col; p.alpha = 25 + (3 - i) * 12
-          cv.drawCircle(cx, cy, r, p)
-          }
-          val core = base * (1f + level * 0.3f)
-          p.shader = RadialGradient(cx, cy, core, 0xFFFFFFFF.toInt(), col, Shader.TileMode.CLAMP)
-          p.alpha = 255
-          cv.drawCircle(cx, cy, core, p)
-          }
-          }
-          EOF
-          mkdir -p $(dirname app/src/main/java/com/jarvis/app/MainActivity.kt)
-          cat > app/src/main/java/com/jarvis/app/MainActivity.kt <<'EOF'
-          package com.jarvis.app
+private fun go(i: Intent) {
+i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+try { ctx.startActivity(i) } catch (e: Exception) { say("Ennala mudiyala: ${e.message}") }
+}
 
-          import android.Manifest
-          import android.app.Activity
-          import android.content.Intent
-          import android.graphics.Bitmap
-          import android.net.Uri
-          import android.os.Bundle
-          import android.provider.MediaStore
-          import android.provider.Settings
-          import android.speech.RecognitionListener
-          import android.speech.SpeechRecognizer
-          import android.view.Gravity
-          import android.view.View
-          import android.widget.Button
-          import android.widget.EditText
-          import android.widget.LinearLayout
-          import android.widget.TextView
+private fun has(p: String) = ctx.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+private fun enc(s: String) = URLEncoder.encode(s.trim(), "UTF-8")
+private fun lines(k: String) = prefs.getString(k, "").orEmpty().lines().filter { it.isNotBlank() }
+private fun addLine(k: String, v: String) =
+prefs.edit().putString(k, (prefs.getString(k, "") ?: "") + v + "\n").apply()
 
-          class MainActivity : Activity() {
-          private lateinit var jarvis: Jarvis
-          private lateinit var orb: OrbView
-          private lateinit var reply: TextView
-          private var sr: SpeechRecognizer? = null
-          private var camQ = ""
+private fun bg(work: () -> String) {
+Thread {
+val r = try { work() } catch (e: Exception) { "Sorry, ${e.message}" }
+main.post { say(r) }
+}.start()
+}
 
-          override fun onCreate(b: Bundle?) {
-          super.onCreate(b)
-          val prefs = getSharedPreferences("jarvis", 0)
-          val dp = resources.displayMetrics.density
-          fun px(v: Int) = (v * dp).toInt()
-          val cyan = 0xFF00E5FF.toInt()
-          val root = LinearLayout(this).apply {
-          orientation = LinearLayout.VERTICAL
-          setBackgroundColor(0xFF05070D.toInt()); setPadding(px(16), px(40), px(16), px(16))
-          }
-          reply = TextView(this).apply {
-          text = "Orb-a thattunga, pesunga"; setTextColor(0xFFCFE8FF.toInt())
-          textSize = 17f; gravity = Gravity.CENTER; minLines = 3
-          }
-          orb = OrbView(this)
-          jarvis = Jarvis(this) { reply.text = it; orb.state = 0; orb.level = 0f }
-          fun run(t: String) { if (t.isNotBlank()) { orb.state = 2; jarvis.handle(t) } }
+private fun get(u: String): String {
+val c = URL(u).openConnection() as HttpURLConnection
+c.connectTimeout = 4000; c.readTimeout = 4000
+c.setRequestProperty("User-Agent", "Jarvis/3.0")
+return c.inputStream.bufferedReader().readText()
+}
 
-          fun btn(t: String, f: (Button) -> Unit) = Button(this).apply {
-          text = t; setTextColor(cyan); setBackgroundColor(0xFF0D1522.toInt()); setOnClickListener { f(this) }
-          }
-          fun row(vararg v: View) = LinearLayout(this).apply {
-          v.forEach { addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
-          }
-          fun langLabel() = "Lang: " + if (prefs.getString("lang", "ta-IN") == "ta-IN") "TA" else "EN"
+fun handle(raw: String, ai: Boolean = false) {
+val t = raw.trim().lowercase(Locale.ROOT)
+when {
+t.startsWith("open ") -> openApp(t.removePrefix("open ").trim())
+t.startsWith("call ") -> call(t.removePrefix("call ").trim())
+t.startsWith("send sms") || t.startsWith("message ") || t.startsWith("text ") -> sms(t)
+t.startsWith("whatsapp ") -> whatsapp(t.removePrefix("whatsapp ").trim())
+t.startsWith("flashlight") || t.startsWith("torch") -> torch(!t.contains("off"))
+t.startsWith("volume ") -> volume(t.contains("up"))
+t.startsWith("search ") -> web("https://www.google.com/search?q=" + enc(t.removePrefix("search ")), "Google-la theduren")
+t.startsWith("youtube ") -> web("https://www.youtube.com/results?search_query=" + enc(t.removePrefix("youtube ")), "YouTube-la theduren")
+t.startsWith("navigate ") -> web("geo:0,0?q=" + enc(t.removePrefix("navigate ")), "Maps open aagudhu")
+t.contains("alarm") -> alarm(t)
+t.contains("remind me") -> remind(t)
+t.contains("timer") -> timer(t)
+t.contains("total expense") || t == "expenses" -> totalExpense()
+t.startsWith("expense ") || t.startsWith("spent ") -> addExpense(t)
+t.contains("clear shopping") -> { prefs.edit().remove("shop").apply(); say("Shopping list clear") }
+t.startsWith("add ") && t.contains("shopping") -> {
+val item = t.removePrefix("add ").substringBefore(" to ").trim()
+addLine("shop", item); say("$item list-la add pannitten")
+}
+t.contains("shopping list") -> say(lines("shop").joinToString(", ").ifBlank { "List khaali" })
+t.startsWith("note ") || t.startsWith("take note ") -> {
+addLine("notes", t.removePrefix("take ").removePrefix("note ").trim()); say("Note save panniten")
+}
+t.contains("read notes") || t.contains("my notes") -> say(lines("notes").joinToString(". ").ifBlank { "Notes onnum illa" })
+t.contains("clear notes") -> { prefs.edit().remove("notes").apply(); say("Notes alichitten") }
+t.startsWith("wiki ") || t.startsWith("wikipedia ") -> wiki(t.substringAfter(" "))
+t.contains("news") -> news()
+t.contains("camera") || t.contains("what is this") -> onCamera?.invoke(raw) ?: say("App-la camera button use pannunga")
+else -> if (ai) say("Idhu enakku seiya theriyala") else ask(raw)
+}
+}
 
-          val cmd = EditText(this).apply { hint = "Type command..."; setHintTextColor(0xFF607080.toInt()); setTextColor(0xFFFFFFFF.toInt()) }
-          val key = EditText(this).apply {
-          hint = "Gemini API key"; setHintTextColor(0xFF607080.toInt()); setTextColor(0xFFFFFFFF.toInt())
-          setText(prefs.getString("key", "")); visibility = if (text.isBlank()) View.VISIBLE else View.GONE
-          }
+private fun web(url: String, msg: String) {
+say(msg)
+go(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+}
 
-          orb.setOnClickListener { listenOnce(prefs.getString("lang", "ta-IN") ?: "ta-IN") }
-          jarvis.onCamera = { q ->
-          camQ = q
-          startActivityForResult(Intent(MediaStore.ACTION_IMAGE_CAPTURE), 7)
-          }
+private fun torch(on: Boolean) {
+try {
+val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+cm.setTorchMode(cm.cameraIdList[0], on)
+say(if (on) "Torch on" else "Torch off")
+} catch (e: Exception) { say("Torch mudiyala") }
+}
 
-          root.addView(reply)
-          root.addView(orb, LinearLayout.LayoutParams(-1, 0, 1f))
-          root.addView(row(
-          btn("Camera") { jarvis.onCamera?.invoke(cmd.text.toString()) },
-          btn(langLabel()) { prefs.edit().putString("lang", if (prefs.getString("lang", "ta-IN") == "ta-IN") "en-IN" else "ta-IN").apply(); it.text = langLabel() },
-          btn("Key") {
-          if (key.visibility == View.VISIBLE) { prefs.edit().putString("key", key.text.toString().trim()).apply(); key.visibility = View.GONE; reply.text = "Key saved" }
-          else key.visibility = View.VISIBLE
-          }))
-          root.addView(row(
-          btn("Wake ON") { startForegroundService(Intent(this, JarvisService::class.java)); reply.text = "'Hey Jarvis' kekkuthu" },
-          btn("Wake OFF") { stopService(Intent(this, JarvisService::class.java)) },
-          btn("Overlay") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) }))
-          root.addView(key)
-          root.addView(row(cmd, btn("Send") { run(cmd.text.toString()); cmd.setText("") }))
-          setContentView(root)
+private fun volume(up: Boolean) {
+val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+say(if (up) "Volume increase" else "Volume decrease")
+}
 
-          requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CALL_PHONE,
-          Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS, Manifest.permission.POST_NOTIFICATIONS), 1)
-          }
+private fun whatsapp(arg: String) {
+val p = arg.split(" ", limit = 2)
+var n = resolve(p[0]) ?: return say("${p[0]} number kedaikala")
+n = n.filter { it.isDigit() }
+if (n.length == 10) n = "91$n"
+web("https://wa.me/$n?text=" + enc(p.getOrElse(1) { "" }), "WhatsApp open aagudhu")
+}
 
-          private fun listenOnce(lang: String) {
-          stopService(Intent(this, JarvisService::class.java))
-          if (!SpeechRecognizer.isRecognitionAvailable(this)) return jarvis.say("Google speech service illa")
-          sr?.destroy()
-          sr = SpeechRecognizer.createSpeechRecognizer(this)
-          sr!!.setRecognitionListener(object : RecognitionListener {
-          override fun onResults(b: Bundle?) {
-          val t = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-          reply.text = t; orb.state = 2; orb.level = 0f; jarvis.handle(t)
-          }
-          override fun onError(e: Int) { orb.state = 0; orb.level = 0f; reply.text = "Kekala, thirumba sollunga" }
-          override fun onRmsChanged(v: Float) { orb.level = ((v + 2f) / 12f).coerceIn(0f, 1f) }
-          override fun onReadyForSpeech(p: Bundle?) { orb.state = 1 }
-          override fun onBeginningOfSpeech() {}
-          override fun onBufferReceived(b: ByteArray?) {}
-          override fun onEndOfSpeech() {}
-          override fun onPartialResults(p: Bundle?) {}
-          override fun onEvent(t: Int, p: Bundle?) {}
-          })
-          sr!!.startListening(recognizerIntent(lang))
-          }
+private fun openApp(name: String) {
+val pm = ctx.packageManager
+val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+val m = pm.queryIntentActivities(q, 0).firstOrNull { it.loadLabel(pm).toString().lowercase().contains(name) }
+val i = m?.let { pm.getLaunchIntentForPackage(it.activityInfo.packageName) }
+if (i == null) say("$name app kedaikala") else { say("Opening $name"); go(i) }
+}
 
-          @Suppress("DEPRECATION")
-          override fun onActivityResult(req: Int, res: Int, data: Intent?) {
-          super.onActivityResult(req, res, data)
-          val bmp = data?.extras?.get("data") as? Bitmap
-          if (req == 7 && res == RESULT_OK && bmp != null) { orb.state = 2; jarvis.askImage(bmp, camQ) }
-          }
+private fun resolve(target: String): String? {
+val digits = target.replace(" ", "")
+if (Regex("^\\+?\\d{6,}$").matches(digits)) return digits
+if (!has(Manifest.permission.READ_CONTACTS)) return null
+ctx.contentResolver.query(
+ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+"${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+arrayOf("%$target%"), null
+)?.use { if (it.moveToFirst()) return it.getString(0) }
+return null
+}
 
-          override fun onDestroy() { sr?.destroy(); jarvis.shutdown(); super.onDestroy() }
-          }
-          EOF
-      - name: Build APK
-        working-directory: JarvisApp
-        run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Jarvis-APK
-          path: JarvisApp/app/build/outputs/apk/debug/app-debug.apk
+private fun call(target: String) {
+val n = resolve(target) ?: return say("$target number kedaikala")
+if (!has(Manifest.permission.CALL_PHONE)) return say("Call permission kudunga")
+say("Calling $target")
+go(Intent(Intent.ACTION_CALL, Uri.parse("tel:$n")))
+}
+
+private fun sms(t: String) {
+val m = Regex("(?:sms to|message|text)\\s+(.+?)\\s+(?:saying|that says|that)\\s+(.+)").find(t)
+?: return say("Format: send sms to <name> saying <message>")
+val n = resolve(m.groupValues[1]) ?: return say("${m.groupValues[1]} number kedaikala")
+if (!has(Manifest.permission.SEND_SMS)) return say("SMS permission kudunga")
+try {
+@Suppress("DEPRECATION")
+SmsManager.getDefault().sendTextMessage(n, null, m.groupValues[2], null, null)
+say("SMS anupitten")
+} catch (e: Exception) { say("SMS fail: ${e.message}") }
+}
+
+private fun seconds(t: String): Int {
+val m = Regex("(\\d+)\\s*(hour|hr|minute|min|second|sec)").find(t) ?: return 0
+val n = m.groupValues[1].toInt()
+return when (m.groupValues[2]) { "hour", "hr" -> n * 3600; "minute", "min" -> n * 60; else -> n }
+}
+
+private fun timer(t: String, label: String = "Jarvis") {
+val s = seconds(t)
+if (s == 0) return say("Evlo neram nu sollunga, example: timer 5 minutes")
+say("Timer set")
+go(Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, s)
+.putExtra(AlarmClock.EXTRA_MESSAGE, label).putExtra(AlarmClock.EXTRA_SKIP_UI, true))
+}
+
+private fun remind(t: String) {
+val what = t.substringAfter("remind me").removePrefix(" to").substringBefore(" in ").trim()
+timer(t, what.ifBlank { "Reminder" })
+}
+
+private fun alarm(t: String) {
+val m = Regex("(\\d{1,2})(?:[:\\s](\\d{2}))?\\s*(am|pm)?").find(t.substringAfter("alarm"))
+?: return say("Neram sollunga, example: alarm 7 30 am")
+var h = m.groupValues[1].toInt()
+val min = m.groupValues[2].ifBlank { "0" }.toInt()
+if (m.groupValues[3] == "pm" && h < 12) h += 12
+if (m.groupValues[3] == "am" && h == 12) h = 0
+say("Alarm set for $h:${"%02d".format(min)}")
+go(Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, h)
+.putExtra(AlarmClock.EXTRA_MINUTES, min).putExtra(AlarmClock.EXTRA_MESSAGE, "Jarvis")
+.putExtra(AlarmClock.EXTRA_SKIP_UI, true))
+}
+
+private fun addExpense(t: String) {
+val m = Regex("(\\d+(?:\\.\\d+)?)\\s*(?:rs|rupees|on|for)?\\s*(.*)").find(t.substringAfter(" "))
+?: return say("Example: expense 200 food")
+val cat = m.groupValues[2].ifBlank { "general" }
+addLine("exp", "${today()}|${m.groupValues[1]}|$cat")
+say("${m.groupValues[1]} rupees $cat-ku save pannitten")
+}
+
+private fun totalExpense() {
+var all = 0.0; var day = 0.0
+lines("exp").forEach {
+val p = it.split("|"); val x = p.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+all += x; if (p[0] == today()) day += x
+}
+say("Innaiku %.0f rupees, mothama %.0f rupees".format(day, all))
+}
+
+private fun news() = bg {
+val xml = get("https://news.google.com/rss?hl=ta&gl=IN&ceid=IN:ta")
+val h = Regex("<title>(.*?)</title>").findAll(xml).drop(1).take(3).map {
+it.groupValues[1].replace("<![CDATA[", "").replace("]]>", "").replace("&amp;", "&")
+.replace("&quot;", "\"").replace("&#39;", "'").substringBeforeLast(" - ")
+}.toList()
+if (h.isEmpty()) "News kedaikala" else "Top news. " + h.joinToString(". ")
+}
+
+private fun wiki(q: String) = bg {
+val j = JSONObject(get("https://en.wikipedia.org/api/rest_v1/page/summary/" +
+URLEncoder.encode(q.trim().replace(" ", "_"), "UTF-8")))
+j.getString("extract").split(Regex("(?<=\\.)\\s")).take(2).joinToString(" ")
+}
+
+private fun part(s: String) = JSONObject().put("text", s)
+
+private fun ask(q: String) {
+Thread {
+val r = try { gemini(JSONArray().put(part(q))) } catch (e: Exception) { "Net slow, thirumba sollunga" }
+main.post { if (r.startsWith("CMD:")) handle(r.removePrefix("CMD:").trim(), true) else say(r) }
+}.start()
+}
+
+fun askImage(bmp: Bitmap, q: String) = bg {
+val o = ByteArrayOutputStream()
+bmp.compress(Bitmap.CompressFormat.JPEG, 80, o)
+val img = JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg")
+.put("data", Base64.encodeToString(o.toByteArray(), Base64.NO_WRAP)))
+gemini(JSONArray().put(part(q.ifBlank { "Idhu enna? Briefly sollunga." })).put(img))
+}
+
+private fun ask1(m: String, key: String, parts: JSONArray, ms: Int): String {
+val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent?key=$key")
+.openConnection() as HttpURLConnection
+c.requestMethod = "POST"
+c.setRequestProperty("Content-Type", "application/json")
+c.connectTimeout = 3000
+c.readTimeout = ms
+c.doOutput = true
+val cfg = JSONObject().put("maxOutputTokens", 120).put("temperature", 0.6)
+if (m.contains("2.5")) cfg.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+val body = JSONObject()
+.put("system_instruction", JSONObject().put("parts", JSONArray().put(part(SYS))))
+.put("contents", JSONArray().put(JSONObject().put("parts", parts)))
+.put("generationConfig", cfg)
+c.outputStream.use { it.write(body.toString().toByteArray()) }
+if (c.responseCode != 200) return ""
+val r = c.inputStream.bufferedReader().readText()
+return JSONObject(r).getJSONArray("candidates").getJSONObject(0)
+.getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text").trim()
+}
+
+// Races several models; first good answer wins.
+private fun gemini(parts: JSONArray): String {
+val key = prefs.getString("key", "").orEmpty()
+if (key.isBlank()) return "Gemini key app-la save pannunga"
+val q = LinkedBlockingQueue<String>()
+val end = System.currentTimeMillis() + 10000
+var started = 0
+fun launch(m: String) {
+started++
+Thread { q.put(try { ask1(m, key, parts, 7000) } catch (e: Exception) { "" }) }.start()
+}
+launch(models[0]); launch(models[1])
+var done = 0
+var next = 2
+while (done < started && System.currentTimeMillis() < end) {
+val r = q.poll(if (next < models.size) 2500L else 500L, TimeUnit.MILLISECONDS)
+if (r == null) { if (next < models.size) launch(models[next++]); continue }
+done++
+if (r.isNotBlank()) return r
+if (next < models.size) launch(models[next++])
+}
+return "Net konjam slow, thirumba sollunga"
+}
+}
